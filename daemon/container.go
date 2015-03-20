@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -1308,6 +1309,53 @@ func (container *Container) setupLinkedContainers() ([]string, error) {
 	return env, nil
 }
 
+func (container *Container) addHostInterfaceEnvironment(env []string) []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return env
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue // interface down
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue // loopback interface
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return env
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ip = ip.To4()
+			if ip == nil {
+				continue // not an ipv4 address
+			}
+			env=append(env, "DOCKER_HOST_"+strings.ToUpper(iface.Name)+"_ADDR="+ip.String());
+		}
+	}
+	return env
+}
+
+func (container *Container)addHostPortEnvironment(env []string) []string {
+	for port, binding := range container.NetworkSettings.Ports {
+		for _, b := range binding {
+			env = append(env, "DOCKER_HOST_"+port.Port()+"_ADDR="+b.HostIp);
+			env = append(env, "DOCKER_HOST_"+port.Port()+"_PORT="+b.HostPort);
+		}
+	}
+	return env
+}
+
 func (container *Container) createDaemonEnvironment(linkedEnv []string) []string {
 	// if a domain name was specified, append it to the hostname (see #7851)
 	fullHostname := container.Config.Hostname
@@ -1331,6 +1379,10 @@ func (container *Container) createDaemonEnvironment(linkedEnv []string) []string
 	// we need to replace the 'env' keys where they match and append anything
 	// else.
 	env = utils.ReplaceOrAppendEnvValues(env, container.Config.Env)
+
+	// add host interface/port mappings
+	env = container.addHostInterfaceEnvironment(env)
+	env = container.addHostPortEnvironment(env)
 
 	return env
 }
